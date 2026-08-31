@@ -86,7 +86,3 @@ Pastikan sudah terinstall:
 ```bash
    npm run dev
 ```
-
-7. **Akses aplikasi**
-
-   Buka browser dan kunjungi:
