@@ -52,7 +52,7 @@ class DashboardController extends Controller
             ->first();
 
         $iuranBulanan = $latestDue ? [
-            'label'   => method_exists($latestDue, 'statusLabel') ? $latestDue->statusLabel() : ucfirst($latestDue->status), 
+            'label'   => method_exists($latestDue, 'statusLabel') ? $latestDue->statusLabel() : ucfirst($latestDue->status),
             'isPaid'  => in_array($latestDue->status, ['lunas', 'diverifikasi']),
             'title'   => $latestDue->title,
             'nominal' => 'Rp ' . number_format($latestDue->amount, 0, ',', '.'),
@@ -63,15 +63,26 @@ class DashboardController extends Controller
 
         // 4. Status Laporan (Ambil laporan terakhir user menggunakan model Laporan)
         $latestLaporan = Laporan::where('user_id', $user->id)->latest()->first();
-        
+
         $laporanStatus = $latestLaporan ? [
             'title'  => $latestLaporan->title ?? $latestLaporan->perihal ?? 'Laporan Warga',
-            'status' => ucfirst(str_replace('_', ' ', $latestLaporan->status ?? 'diproses')), 
+            'status' => ucfirst(str_replace('_', ' ', $latestLaporan->status ?? 'diproses')),
         ] : null;
 
         // 5. Notifikasi (Dari Database)
-        $notifications = Notification::where('house_id', $houseId)
-            ->orWhere('recipient_role', $user->role)
+        // 🔄 FIX: dibungkus closure agar scoping-nya benar —
+        // sebelumnya "orWhere('recipient_role', ...)" tanpa kurung bisa
+        // menampilkan notifikasi milik rumah lain yang kebetulan recipient_role-nya sama.
+        $notifications = Notification::where(function ($q) use ($houseId, $user) {
+                $q->where('house_id', $houseId)
+                  ->orWhere(function ($q2) use ($user) {
+                      $q2->whereNull('house_id')
+                         ->where(function ($q3) use ($user) {
+                             $q3->whereNull('recipient_role')
+                                ->orWhere('recipient_role', $user->role);
+                         });
+                  });
+            })
             ->latest()
             ->take(3)
             ->get()

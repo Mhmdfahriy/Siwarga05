@@ -588,102 +588,114 @@ class PaymentController extends Controller
     }
 
     public function generateMonthly(Request $request)
-    {
-        $user = Auth::user();
-        abort_unless($user->isBendahara(), 403);
+{
+    $user = Auth::user();
+    abort_unless($user->isBendahara(), 403);
 
-        $validated = $request->validate([
-            'period_month' => ['required', 'integer', 'min:1', 'max:12'],
-            'period_year'  => ['required', 'integer', 'min:2020', 'max:2100'],
-            'amount'       => ['required', 'numeric', 'min:0'],
-        ]);
+    $validated = $request->validate([
+        'period_month' => ['required', 'integer', 'min:1', 'max:12'],
+        'period_year'  => ['required', 'integer', 'min:2020', 'max:2100'],
+        'amount'       => ['required', 'numeric', 'min:0'],
+    ]);
 
-        $houses = House::all();
-        $created = 0;
+    // Eager load users di awal, sebelum loop
+    $houses = House::with('users')->get();
 
-        foreach ($houses as $house) {
-            $exists = Due::where('house_id', $house->id)
-                ->where('type', 'bulanan')
-                ->where('period_month', $validated['period_month'])
-                ->where('period_year', $validated['period_year'])
-                ->exists();
+    // Ambil SEKALI semua house_id yang sudah punya tagihan bulan ini,
+    // biar nggak perlu query ->exists() per rumah di dalam loop
+    $existingHouseIds = Due::where('type', 'bulanan')
+        ->where('period_month', $validated['period_month'])
+        ->where('period_year', $validated['period_year'])
+        ->pluck('house_id')
+        ->all();
 
-            if ($exists) continue;
+    $created = 0;
 
-            $months = [1=>'Januari',2=>'Februari',3=>'Maret',4=>'April',5=>'Mei',6=>'Juni',7=>'Juli',8=>'Agustus',9=>'September',10=>'Oktober',11=>'November',12=>'Desember'];
-            $title = "Iuran Bulan {$months[$validated['period_month']]} {$validated['period_year']}";
-
-            $due = Due::create([
-                'house_id'     => $house->id,
-                'title'        => $title,
-                'type'         => 'bulanan',
-                'period_month' => $validated['period_month'],
-                'period_year'  => $validated['period_year'],
-                'amount'       => $validated['amount'],
-                'status'       => 'belum_bayar',
-            ]);
-
-            Notification::create([
-                'house_id'      => $house->id,
-                'notifiable_id' => $due->id,
-                'title'         => 'Tagihan Iuran Baru',
-                'message'       => "Tagihan baru '{$title}' sebesar Rp " . number_format($validated['amount'], 0, ',', '.') . " telah diterbitkan. Mohon segera melakukan pembayaran.",
-                'category'      => 'keuangan',
-            ]);
-
-            $house->loadMissing('users');
-            NotificationPreferenceService::notifyHouse($house, 'iuran', new DueCreatedNotification($due));
-
-            $created++;
+    foreach ($houses as $house) {
+        // Cek di memory (array PHP), bukan query database lagi
+        if (in_array($house->id, $existingHouseIds)) {
+            continue;
         }
 
-        return back()->with('status', "Tagihan bulanan berhasil dibuat untuk {$created} rumah.");
+        $months = [1=>'Januari',2=>'Februari',3=>'Maret',4=>'April',5=>'Mei',6=>'Juni',7=>'Juli',8=>'Agustus',9=>'September',10=>'Oktober',11=>'November',12=>'Desember'];
+        $title = "Iuran Bulan {$months[$validated['period_month']]} {$validated['period_year']}";
+
+        $due = Due::create([
+            'house_id'     => $house->id,
+            'title'        => $title,
+            'type'         => 'bulanan',
+            'period_month' => $validated['period_month'],
+            'period_year'  => $validated['period_year'],
+            'amount'       => $validated['amount'],
+            'status'       => 'belum_bayar',
+        ]);
+
+        Notification::create([
+            'house_id'      => $house->id,
+            'notifiable_id' => $due->id,
+            'title'         => 'Tagihan Iuran Baru',
+            'message'       => "Tagihan baru '{$title}' sebesar Rp " . number_format($validated['amount'], 0, ',', '.') . " telah diterbitkan. Mohon segera melakukan pembayaran.",
+            'category'      => 'keuangan',
+        ]);
+
+        NotificationPreferenceService::notifyHouse($house, 'iuran', new DueCreatedNotification($due));
+
+        $created++;
     }
+
+    return back()->with('status', "Tagihan bulanan berhasil dibuat untuk {$created} rumah.");
+}
 
     public function storeIncidental(Request $request)
-    {
-        $user = Auth::user();
-        abort_unless($user->isBendahara(), 403);
+{
+    $user = Auth::user();
+    abort_unless($user->isBendahara(), 403);
 
-        $validated = $request->validate([
-            'title'       => ['required', 'string', 'max:255'],
-            'amount_type' => ['required', Rule::in(['fixed', 'voluntary'])],
-            'amount'      => ['required_if:amount_type,fixed', 'nullable', 'numeric', 'min:0'],
-            'target'      => ['required', Rule::in(['semua', 'tertentu'])],
-            'house_ids'   => ['required_if:target,tertentu', 'array'],
-            'house_ids.*' => ['exists:houses,id'],
+    $validated = $request->validate([
+        'title'       => ['required', 'string', 'max:255'],
+        'amount_type' => ['required', Rule::in(['fixed', 'voluntary'])],
+        'amount'      => ['required_if:amount_type,fixed', 'nullable', 'numeric', 'min:0'],
+        'target'      => ['required', Rule::in(['semua', 'tertentu'])],
+        'house_ids'   => ['required_if:target,tertentu', 'array'],
+        'house_ids.*' => ['exists:houses,id'],
+    ]);
+
+    $amount = $validated['amount_type'] === 'voluntary' ? 0 : $validated['amount'];
+
+    $houseIds = $validated['target'] === 'semua'
+        ? House::pluck('id')
+        : collect($validated['house_ids']);
+
+    // Ambil semua rumah + relasinya SEKALIGUS sebelum loop, lalu index by id
+    $houses = House::with('users')->whereIn('id', $houseIds)->get()->keyBy('id');
+
+    foreach ($houseIds as $houseId) {
+        $due = Due::create([
+            'house_id' => $houseId,
+            'title'    => $validated['title'],
+            'type'     => 'insidental',
+            'amount'   => $amount,
+            'status'   => 'belum_bayar',
         ]);
 
-        $amount = $validated['amount_type'] === 'voluntary' ? 0 : $validated['amount'];
+        $formattedAmount = $amount > 0 ? "sebesar Rp " . number_format($amount, 0, ',', '.') : "secara sukarela (seikhlasnya)";
+        Notification::create([
+            'house_id'      => $houseId,
+            'notifiable_id' => $due->id,
+            'title'         => 'Tagihan Khusus / Insidental Baru',
+            'message'       => "Tagihan baru '{$validated['title']}' {$formattedAmount} telah diterbitkan.",
+            'category'      => 'keuangan',
+        ]);
 
-        $houseIds = $validated['target'] === 'semua'
-            ? House::pluck('id')
-            : collect($validated['house_ids']);
-
-        foreach ($houseIds as $houseId) {
-            $due = Due::create([
-                'house_id' => $houseId,
-                'title'    => $validated['title'],
-                'type'     => 'insidental',
-                'amount'   => $amount,
-                'status'   => 'belum_bayar',
-            ]);
-
-            $formattedAmount = $amount > 0 ? "sebesar Rp " . number_format($amount, 0, ',', '.') : "secara sukarela (seikhlasnya)";
-            Notification::create([
-                'house_id'      => $houseId,
-                'notifiable_id' => $due->id,
-                'title'         => 'Tagihan Khusus / Insidental Baru',
-                'message'       => "Tagihan baru '{$validated['title']}' {$formattedAmount} telah diterbitkan.",
-                'category'      => 'keuangan',
-            ]);
-
-            $due->loadMissing('house.users');
-            NotificationPreferenceService::notifyHouse($due->house, 'iuran', new DueCreatedNotification($due));
+        // Ambil dari map yang sudah di-eager-load, bukan loadMissing lagi
+        $house = $houses->get($houseId);
+        if ($house) {
+            NotificationPreferenceService::notifyHouse($house, 'iuran', new DueCreatedNotification($due));
         }
-
-        return back()->with('status', "Tagihan insidental berhasil dibuat untuk {$houseIds->count()} rumah.");
     }
+
+    return back()->with('status', "Tagihan insidental berhasil dibuat untuk {$houseIds->count()} rumah.");
+}
 
     public function destroyDue(Due $due)
     {
@@ -891,33 +903,36 @@ class PaymentController extends Controller
     }
 
    public function remindAllDues()
-   {
-        $user = Auth::user();
-        abort_unless($user->isBendahara(), 403);
+{
+    $user = Auth::user();
+    abort_unless($user->isBendahara(), 403);
 
-        $unpaidDues = Due::whereIn('status', ['belum_bayar', 'ditolak'])->get();
-        $count = 0;
+    // Eager load house.users di awal, sebelum loop
+    $unpaidDues = Due::with('house.users')
+        ->whereIn('status', ['belum_bayar', 'ditolak'])
+        ->get();
 
-        foreach ($unpaidDues as $due) {
-            $isVoluntary = $due->type === 'insidental' && (float) $due->amount === 0.0;
-            $formattedAmount = $isVoluntary
-                ? "secara sukarela (seikhlasnya)"
-                : "senilai Rp " . number_format($due->amount, 0, ',', '.');
+    $count = 0;
 
-            Notification::create([
-                'house_id'      => $due->house_id,
-                'notifiable_id' => $due->id,
-                'title'         => 'Pengingat Pembayaran Iuran RT 05',
-                'message'       => "Pengingat: Tagihan '{$due->title}' Anda {$formattedAmount} berstatus belum lunas. Segera lakukan pembayaran.",
-                'category'      => 'keuangan',
-            ]);
+    foreach ($unpaidDues as $due) {
+        $isVoluntary = $due->type === 'insidental' && (float) $due->amount === 0.0;
+        $formattedAmount = $isVoluntary
+            ? "secara sukarela (seikhlasnya)"
+            : "senilai Rp " . number_format($due->amount, 0, ',', '.');
 
-            $due->loadMissing('house.users');
-            NotificationPreferenceService::notifyHouse($due->house, 'iuran', new DueReminderNotification($due));
+        Notification::create([
+            'house_id'      => $due->house_id,
+            'notifiable_id' => $due->id,
+            'title'         => 'Pengingat Pembayaran Iuran RT 05',
+            'message'       => "Pengingat: Tagihan '{$due->title}' Anda {$formattedAmount} berstatus belum lunas. Segera lakukan pembayaran.",
+            'category'      => 'keuangan',
+        ]);
 
-            $count++;
-        }
+        NotificationPreferenceService::notifyHouse($due->house, 'iuran', new DueReminderNotification($due));
 
-        return back()->with('status', "Berhasil mengirim pengingat massal ke {$count} tagihan yang belum lunas.");
-   }
+        $count++;
+    }
+
+    return back()->with('status', "Berhasil mengirim pengingat massal ke {$count} tagihan yang belum lunas.");
+}
 }

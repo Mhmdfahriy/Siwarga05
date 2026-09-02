@@ -16,7 +16,7 @@ class NotificationController extends Controller
         'warga'      => 'warga',
     ];
 
-    private function resolveActions(string $category, string $role, ?int $notifiableId, ?string $title = null): ?array
+    private function resolveActions(string $category, string $role, ?int $notifiableId, ?string $title = null, $paymentsMap = null): ?array
     {
         $prefix = self::ROLE_PREFIX[$role] ?? 'warga';
         $lowerTitle = strtolower($title ?? '');
@@ -47,20 +47,20 @@ class NotificationController extends Controller
                     [
                         // 1. Bayar Ulang -> ke form pembayaran (bayar.jsx)
                         'label'   => 'Bayar Ulang',
-                        'url'     => route("{$prefix}.dues.payment-form", $this->duesAndMethodQueryForPayment($notifiableId)),
+                        'url'     => route("{$prefix}.dues.payment-form", $this->duesAndMethodQueryForPayment($notifiableId, $paymentsMap)),
                         'primary' => false,
                     ],
                     [
                         // 2. Lihat Detail -> Mengambil UUID payment yang benar agar tidak 404 ke invoice.jsx
                         'label'   => 'Lihat Detail',
-                        'url'     => $this->getPaymentUuidUrl($prefix, $notifiableId),
+                        'url'     => $this->getPaymentUuidUrl($prefix, $notifiableId, $paymentsMap),
                         'primary' => false,
                     ],
                     [
                         // 3. Upload Ulang Bukti Pembayaran -> Bendahara ke index tab antrian, Warga ke index biasa
                         'label'   => 'Upload Ulang Bukti Pembayaran',
-                        'url'     => $role === 'bendahara' 
-                            ? route("{$prefix}.dues.index", ['tab' => 'antrean_verifikasi']) 
+                        'url'     => $role === 'bendahara'
+                            ? route("{$prefix}.dues.index", ['tab' => 'antrean_verifikasi'])
                             : route("{$prefix}.dues.index"),
                         'primary' => true,
                     ],
@@ -82,7 +82,7 @@ class NotificationController extends Controller
                 str_contains($lowerTitle, 'diverifikasi') => [
                     [
                         'label'   => 'Lihat Riwayat',
-                        'url'     => $this->getPaymentUuidUrl($prefix, $notifiableId),
+                        'url'     => $this->getPaymentUuidUrl($prefix, $notifiableId, $paymentsMap),
                         'primary' => false,
                     ],
                 ],
@@ -133,13 +133,15 @@ class NotificationController extends Controller
     }
 
     // Helper aman untuk mengambil UUID payment agar route dues.success tidak 404
-    private function getPaymentUuidUrl(string $prefix, ?int $paymentId): string
+    // 🔄 Ambil dari $paymentsMap yang sudah di-eager-load, bukan query baru per notifikasi
+    private function getPaymentUuidUrl(string $prefix, ?int $paymentId, $paymentsMap = null): string
     {
         if (!$paymentId) {
             return route("{$prefix}.dues.index");
         }
 
-        $payment = DuesPayment::find($paymentId);
+        $payment = $paymentsMap?->get($paymentId);
+
         if ($payment && $payment->uuid) {
             return route("{$prefix}.dues.success", $payment->uuid);
         }
@@ -147,24 +149,14 @@ class NotificationController extends Controller
         return route("{$prefix}.dues.index");
     }
 
-    private function duesQueryForPayment(?int $paymentId): array
+    // 🔄 Ambil dari $paymentsMap (relasi 'dues' sudah eager-loaded), bukan query baru per notifikasi
+    private function duesAndMethodQueryForPayment(?int $paymentId, $paymentsMap = null): array
     {
         if (!$paymentId) {
             return [];
         }
 
-        $dueIds = DuesPayment::find($paymentId)?->dues->pluck('id')->all();
-
-        return !empty($dueIds) ? ['dues' => $dueIds] : [];
-    }
-
-    private function duesAndMethodQueryForPayment(?int $paymentId): array
-    {
-        if (!$paymentId) {
-            return [];
-        }
-
-        $payment = DuesPayment::find($paymentId);
+        $payment = $paymentsMap?->get($paymentId);
         if (!$payment) {
             return [];
         }
@@ -179,10 +171,25 @@ class NotificationController extends Controller
         return $query;
     }
 
+    // 🆕 Kumpulkan semua notifiable_id kategori 'keuangan' dalam collection,
+    // lalu ambil SEMUA DuesPayment yang dibutuhkan sekaligus (1 query, eager load 'dues')
+    // sebelum melakukan mapping per item — menghindari N+1 di resolveActions().
     private function applyActions($collection, string $role)
     {
-        return $collection->map(function ($item) use ($role) {
-            $resolved = $this->resolveActions($item->category, $role, $item->notifiable_id, $item->title);
+        $paymentIds = $collection
+            ->where('category', 'keuangan')
+            ->pluck('notifiable_id')
+            ->filter()
+            ->unique()
+            ->values();
+
+        $paymentsMap = DuesPayment::whereIn('id', $paymentIds)
+            ->with('dues')
+            ->get()
+            ->keyBy('id');
+
+        return $collection->map(function ($item) use ($role, $paymentsMap) {
+            $resolved = $this->resolveActions($item->category, $role, $item->notifiable_id, $item->title, $paymentsMap);
             if ($resolved !== null) {
                 $item->actions = $resolved;
             }
