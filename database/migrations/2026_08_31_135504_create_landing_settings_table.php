@@ -11,6 +11,8 @@ return new class extends Migration
         Schema::create('landing_settings', function (Blueprint $table) {
             $table->id();
             $table->text('hero_title')->nullable();
+            $table->string('hero_highlight')->nullable();
+            $table->string('hero_highlight_color')->nullable()->default('#34d399');
             $table->string('hero_subtitle')->nullable();
             $table->string('hero_bg_image')->nullable();
             $table->timestamps();

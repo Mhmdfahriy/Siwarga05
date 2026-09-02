@@ -140,7 +140,7 @@ export default function Landing({ news = [], totalWarga = 0, totalKK = 0, galler
 
     return (
         <>
-            <Head title={`Siwarga05${homeData.hero_highlight ? ` - ${homeData.hero_highlight}` : ''}`} />
+            <Head title={`Home${homeData.hero_highlight ? ` - ${homeData.hero_highlight}` : ''}`} />
 
             <style>{`
                 @keyframes fadeSlideUp {

@@ -1,111 +1,51 @@
 <?php
 
-namespace App\Http\Controllers\Sekretaris;
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
 
-use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
-use Inertia\Inertia;
-use Inertia\Response;
-use App\Models\User;
-use App\Models\Laporan;
-use App\Models\News;
-use App\Models\Kalender;
-use App\Models\Notification;
-use Carbon\Carbon;
-use Illuminate\Support\Facades\Auth;
-
-class DashboardController extends Controller
+return new class extends Migration
 {
-    public function index(Request $request): Response
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
     {
-        Carbon::setLocale('id');
+        Schema::create('notifications', function (Blueprint $table) {
+            $table->id();
 
-        $user = Auth::user();
+            // house_id sudah langsung dibuat nullable di sini
+            $table->foreignId('house_id')
+                ->nullable()
+                ->constrained()
+                ->cascadeOnDelete();
 
-        // 1. Ambil data ringkasan (Stats)
-        $beritaCount = News::count();
-        $laporanCount = Laporan::count();
-        $kegiatanCount = Kalender::whereMonth('date', now()->month)->count();
-        $wargaCount = User::where('role', 'warga')->count();
+            $table->string('category'); // keuangan | berita | laporan | sistem
+            $table->string('title');
+            $table->text('message');
 
-        // 🔄 FIX: hitung notifikasi belum dibaca berdasarkan recipient_role/house_id,
-        // BUKAN notifiable_id — kolom itu bagian dari polymorphic relation ke model
-        // terkait (News/Laporan/DuesPayment), tidak menyimpan ID penerima sama sekali.
-        $notifikasiCount = Notification::whereNull('house_id')
-            ->where(function ($q) use ($user) {
-                $q->whereNull('recipient_role')
-                  ->orWhere('recipient_role', $user->role);
-            })
-            ->whereNull('read_at')
-            ->count();
+            $table->nullableMorphs('notifiable'); // relasi opsional ke Iuran/Laporan/dll
 
-        // 2. Ambil data status Laporan
-        $statusLaporan = [
-            'baru' => Laporan::whereIn('status', ['baru', 'pending'])->count(),
-            'diproses' => Laporan::where('status', 'diproses')->count(),
-            'selesai' => Laporan::where('status', 'selesai')->count(),
-        ];
+            // Kolom recipient_role dipindah ke sini agar rapi sebelum indeks
+            $table->string('recipient_role')->nullable();
 
-        // 3. Ambil 3 Berita Terbaru
-        $beritaTerbaru = News::latest()->take(3)->get()->map(function ($news) {
-            return [
-                'kategori' => $news->category ?? 'Umum',
-                'tanggal' => Carbon::parse($news->created_at)->translatedFormat('d M Y'),
-                'judul' => $news->title
-            ];
+            $table->json('actions')->nullable(); // tombol aksi dinamis
+
+            $table->timestamp('read_at')->nullable();
+            $table->timestamps();
+
+            // Kumpulan Index
+            $table->index(['house_id', 'category']);
+            $table->index(['house_id', 'read_at']);
+            $table->index(['recipient_role']);
         });
-
-        // 4. Ambil 3 Agenda Kegiatan Terdekat
-        $agendaKegiatan = Kalender::whereDate('date', '>=', now())
-            ->orderBy('date', 'asc')
-            ->take(3)
-            ->get()
-            ->map(function ($agenda) {
-                $tanggal = Carbon::parse($agenda->date);
-                $waktu = $agenda->time ? Carbon::parse($agenda->time)->format('H.i') . ' WIB' : '00.00 WIB';
-
-                return [
-                    'bulan' => $tanggal->translatedFormat('M'),
-                    'tanggal' => $tanggal->format('d'),
-                    'judul' => $agenda->title,
-                    'waktu' => $waktu
-                ];
-            });
-
-        // 5. Log Aktivitas Terbaru (Diambil langsung dari tabel notifications)
-        // 🔄 FIX: sama seperti di atas — pakai recipient_role/house_id, bukan notifiable_id.
-        // orWhere juga dibungkus closure agar tidak bocor ke notifikasi rumah tertentu.
-        $aktivitasTerbaru = Notification::whereNull('house_id')
-            ->where(function ($q) use ($user) {
-                $q->whereNull('recipient_role')
-                  ->orWhere('recipient_role', $user->role);
-            })
-            ->latest()
-            ->take(4)
-            ->get()
-            ->map(function ($notif) {
-                return [
-                    'deskripsi' => $notif->title,
-                    'waktuLalu' => Carbon::parse($notif->created_at)->diffForHumans()
-                ];
-            });
-
-        return Inertia::render('Sekretaris/Dashboard', [
-            'user' => [
-                'name' => $user->name ?? 'Sekretaris',
-                'role' => 'RT 05'
-            ],
-            'stats' => [
-                'berita' => $beritaCount,
-                'laporan' => $laporanCount,
-                'kegiatan' => $kegiatanCount,
-                'notifikasi' => $notifikasiCount,
-                'warga' => $wargaCount,
-            ],
-            'statusLaporan' => $statusLaporan,
-            'beritaTerbaru' => $beritaTerbaru,
-            'agendaKegiatan' => $agendaKegiatan,
-            'aktivitasTerbaru' => $aktivitasTerbaru,
-        ]);
     }
-}
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('notifications');
+    }
+};
